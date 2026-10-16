@@ -376,7 +376,8 @@ impl OcrModel {
                 .map_err(|e| format!("ocr: builder: {e}"))?
                 .with_intra_threads(1)
                 .map_err(|e| format!("ocr: intra_threads: {e}"))?;
-            let builder = docling_onnx::apply(builder).map_err(|e| format!("ocr: {e}"))?;
+            let builder = docling_onnx::apply_stage(builder, "DOCLING_RS_OCR_EP")
+                .map_err(|e| format!("ocr: {e}"))?;
             docling_onnx::commit(builder, &rec_path, "rec")
                 .map_err(|e| format!("ocr: load {rec_path}: {e}"))
         };

@@ -564,6 +564,29 @@ install them with `cp -L`, next to the installed binary: ONNX Runtime
 opens them from the binary's directory, not through `LD_LIBRARY_PATH`
 (#664).
 
+**Volta / Pascal GPUs (Tesla V100 = sm_70, P100, GTX 10xx):** CUDA 13 dropped
+them, so the CUDA 13 build fails there at `cublasCreate` with `CUBLAS failure 8:
+the function requires an architectural feature absent from the device`.
+pyke ships no CUDA 12 ONNX Runtime, so link Microsoft's instead (the dynamic
+recipe below, with the `gpu_cuda12` asset — built for sm_60…sm_120) on a CUDA
+12.x + cuDNN 9 machine (driver ≥ 570). The Dockerfile does exactly this:
+`docker build -f crates/docling-serve/Dockerfile --target serve-cuda12 .`
+(also `cli-cuda12`; `--build-arg CUDA_VERSION=12.x.y` picks the base image).
+Outside the image, use cuDNN **9.10–9.11** for these GPUs: 9.8 (the
+`nvidia/cuda:12.8.1-cudnn` images' version) fails the PP-OCRv6 recognizer's
+asymmetric-padding convolutions with `CUDNN_FE failure 8:
+HEURISTIC_QUERY_FAILED` (microsoft/onnxruntime#26274), and 9.12+ dropped
+compute capability < 7.5. The image pins `libcudnn9-cuda-12=9.11.1.4-1`. On an
+8 GB card also cap the per-process session count —
+`DOCLING_RS_PDF_WORKERS=1 DOCLING_RS_OCR_SESSIONS=1` (the image's default) —
+or the per-worker CUDA arenas exhaust the device (`CUBLAS failure 3`).
+`DOCLING_RS_OCR_EP=cpu` (also the image's default) keeps the OCR models —
+detector, recognizer, line classifier — on the CPU while layout and
+TableFormer use the GPU: on Pascal, ONNX Runtime 1.31's cuDNN-9 convolution
+path sized the recognizer's scratch buffer at 8–17 GB per run (`BFCArena …
+Failed to allocate memory`), and the small, width-varying OCR batches gain
+little from a GPU. `auto` (or unset) follows `DOCLING_RS_EP`.
+
 The same features exist on every binding: the Python GPU wheel ships as
 [`docling-rs-cuda`](https://pypi.org/project/docling-rs-cuda/) on PyPI, the
 Node addon ships as [`docling.rs-cuda`](https://www.npmjs.com/package/docling.rs-cuda)

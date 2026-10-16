@@ -665,6 +665,43 @@ pub fn apply(builder: SessionBuilder) -> Result<SessionBuilder, String> {
     memory_opts(builder)
 }
 
+/// Register execution providers like [`apply`], unless the stage's own
+/// provider override `stage_var` (e.g.
+/// `DOCLING_RS_OCR_EP`) says `cpu`: then the session stays on the CPU
+/// provider whatever `DOCLING_RS_EP` chose for the rest of the process.
+///
+/// For stages whose models are a poor fit for a GPU on some hardware. The
+/// motivating case is the OCR models on Pascal-class GPUs (Quadro P4000,
+/// sm_61) under the CUDA 12 image: ONNX Runtime 1.31's cuDNN-9 convolution
+/// path sizes its scratch buffer from the top-ranked cuDNN plan with no cap
+/// (the legacy path's 32 MB `cudnn_conv_use_max_workspace` limit does not
+/// apply), and for the recognizer's width-varying line batches cuDNN 9.11
+/// ranks plans needing 8–17 GB first, so every run failed in `BFCArena`. The
+/// OCR models are small and see a new input width on nearly every call — a
+/// fresh cuDNN plan each time — so the CPU costs them little, while layout
+/// and TableFormer keep the GPU. Any other value (or unset) follows
+/// [`apply`]; an unrecognized one warns once.
+pub fn apply_stage(builder: SessionBuilder, stage_var: &str) -> Result<SessionBuilder, String> {
+    let Some(raw) = docling_core::env::nonempty(stage_var) else {
+        return apply(builder);
+    };
+    match parse(&raw) {
+        Some(Ep::Cpu) => memory_opts(builder),
+        Some(Ep::Auto) => apply(builder),
+        _ => {
+            static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            let mut warned = WARNED.lock().unwrap_or_else(|p| p.into_inner());
+            if !warned.iter().any(|v| v == stage_var) {
+                warned.push(stage_var.to_string());
+                eprintln!(
+                    "docling-rs: {stage_var}={raw:?} is not cpu|auto; following DOCLING_RS_EP"
+                );
+            }
+            apply(builder)
+        }
+    }
+}
+
 /// Session memory options (#263): with `DOCLING_RS_NO_ARENA` set, the CPU
 /// execution provider registers with its memory arena disabled
 /// (`DisableCpuMemArena`) and initializers stay out of arena allocations.

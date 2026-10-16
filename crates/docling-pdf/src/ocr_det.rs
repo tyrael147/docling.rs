@@ -635,7 +635,8 @@ mod session {
                 .map_err(|e| format!("ocr-det: builder: {e}"))?
                 .with_intra_threads(intra.max(1))
                 .map_err(|e| format!("ocr-det: intra_threads: {e}"))?;
-            let builder = docling_onnx::apply(builder).map_err(|e| format!("ocr-det: {e}"))?;
+            let builder = docling_onnx::apply_stage(builder, "DOCLING_RS_OCR_EP")
+                .map_err(|e| format!("ocr-det: {e}"))?;
             let session = docling_onnx::commit(builder, &path, "det")
                 .map_err(|e| format!("ocr-det: load {path}: {e}"))?;
             Ok(Self { session })

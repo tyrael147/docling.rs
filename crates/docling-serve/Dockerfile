@@ -14,6 +14,21 @@
 #   docker build -f crates/docling-serve/Dockerfile --target serve-cuda -t docling-rs-serve-cuda .
 #   docker build -f crates/docling-serve/Dockerfile --target cli-cuda   -t docling-rs-cuda .
 #
+# NVIDIA CUDA 12.8 GPU targets, for GPUs CUDA 13 dropped (Maxwell/Pascal/Volta:
+# Tesla V100 = sm_70, P100, GTX 10xx) — a CUDA 13 image dies on them at
+# `cublasCreate` with CUBLAS_STATUS_ARCH_MISMATCH ("CUBLAS failure 8"). Built on
+# Ubuntu 24.04 + cuDNN 9.11 (the last cuDNN with pre-Turing support, and the
+# first fix for cuDNN 9.8's asymmetric-padding convs — see runtime-cuda12),
+# linked against Microsoft's CUDA 12 ONNX Runtime (pyke ships no CUDA 12
+# build); host driver >= 570 recommended (560 runs it through CUDA minor-version
+# compatibility). Also runs on Turing..Blackwell:
+#   docker build -f crates/docling-serve/Dockerfile --target serve-cuda12 -t docling-rs-serve-cuda12 .
+#   docker build -f crates/docling-serve/Dockerfile --target cli-cuda12   -t docling-rs-cuda12 .
+#   docker run --gpus all -p 5001:5001 docling-rs-serve-cuda12
+# (`--build-arg CUDA_VERSION=12.9.1` picks another CUDA 12.x base image;
+# `--build-arg ORT_VERSION=…` another ONNX Runtime release — keep it equal to
+# the version `ort-sys` is pinned to, 1.31.0 for ort 2.0.0-rc.14.)
+#
 # CLI image: the entrypoint is `docling-rs`, the working directory /data — mount
 # the documents there and pass the usual flags:
 #   docker run --rm -v "$PWD:/data" docling-rs report.pdf --to md
@@ -51,6 +66,10 @@
 # just the workspace crates. The ML assets are fetched in their own stage
 # that depends on nothing but the download script, so ~900 MB of models are
 # not re-downloaded per build either.
+
+# CUDA 12.x base image tag of the *-cuda12 targets. Global, i.e. before the first
+# FROM, because it is used in FROM lines.
+ARG CUDA_VERSION=12.8.1
 
 # ------------------------------------------------------------------------------
 # Stage: chef & planner (shared across CPU and CUDA builds)
@@ -110,6 +129,52 @@ RUN cargo build --release -p docling-serve -p docling-cli --features cuda --lock
     && test $(find -L target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" -type f | wc -l) -ge 2 \
     && find target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" -exec cp -vL {} /src/cuda-dylibs/ \; \
     && ! find /src/cuda-dylibs -type l | grep .
+# ------------------------------------------------------------------------------
+# Stage: CUDA 12 build (Linux x86_64, Microsoft's CUDA 12 ONNX Runtime, dynamic)
+#
+# For GPUs CUDA 13 no longer supports (sm_50..sm_70, e.g. Tesla V100). pyke's
+# prebuilt ONNX Runtime is CUDA 13 only, so `ort-sys` is pointed at Microsoft's
+# release instead (ORT_LIB_LOCATION + ORT_PREFER_DYNAMIC_LINK, the recipe of
+# docs/MODELS.md): its CUDA 12.8 build carries sm_60/70/75/80/86/89/90/120
+# kernels. The binaries link libonnxruntime.so dynamically, so the library and
+# its providers ship in /usr/local/lib of the runtime stage.
+# ------------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS chef-cuda12
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# Must match the ONNX Runtime ort-sys targets (ort 2.0.0-rc.14 -> 1.31.0). The
+# digest pins the default release; clear ORT_SHA256 when overriding ORT_VERSION.
+ARG ORT_VERSION=1.31.0
+ARG ORT_SHA256=62d3af5269af2143b5d37494337573f1ffb8885f3ad7477ae0cb1cc79c8dedfd
+RUN curl -fsSL -o /tmp/ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda12-${ORT_VERSION}.tgz" \
+    && if [ -n "$ORT_SHA256" ]; then echo "$ORT_SHA256  /tmp/ort.tgz" | sha256sum -c -; fi \
+    && mkdir -p /opt/onnxruntime \
+    && tar xzf /tmp/ort.tgz -C /opt/onnxruntime --strip-components=1 \
+    && rm /tmp/ort.tgz \
+    && test -e /opt/onnxruntime/lib/libonnxruntime_providers_cuda.so
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    ORT_PREFER_DYNAMIC_LINK=1
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.96.0 --profile minimal \
+    && cargo install cargo-chef --locked
+WORKDIR /src
+
+FROM chef-cuda12 AS build-cuda12
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release -p docling-serve -p docling-cli --features cuda --locked --recipe-path recipe.json
+COPY . .
+# The runtime stage needs the SONAME chain (libonnxruntime.so -> .so.1 ->
+# .so.1.31.0) and the provider libraries; `cp -a` keeps the relative links
+# between them, and the build fails if one of them dangles.
+RUN cargo build --release -p docling-serve -p docling-cli --features cuda --locked \
+    && mkdir -p /src/cuda-dylibs \
+    && cp -a /opt/onnxruntime/lib/libonnxruntime*.so* /src/cuda-dylibs/ \
+    && test $(find /src/cuda-dylibs -name "libonnxruntime_providers_*.so" -type f | wc -l) -ge 2 \
+    && ! find /src/cuda-dylibs -xtype l | grep .
+
 # ------------------------------------------------------------------------------
 # Stage: IBM Z (s390x) cross build (#504)
 #
@@ -202,6 +267,63 @@ ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
     DOCLING_RS_SYSTEM_FONTS=0 \
     DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 
+# ------------------------------------------------------------------------------
+# Stage: runtime-cuda12 (CUDA 12.8 + pinned cuDNN 9.11 on Ubuntu 24.04)
+#
+# Not the `-cudnn-runtime` image: its cuDNN 9.8.0 has no engine for a
+# convolution with asymmetric padding, so the PP-OCRv6 recognizer
+# (ocr_rec_v6.onnx — 2x2 `SAME_UPPER` convs in its stem, pads [0,0]/[1,1])
+# fails every run with `CUDNN_FE failure 8: HEURISTIC_QUERY_FAILED` / "No
+# valid engine configs" (microsoft/onnxruntime#26274; fixed in cuDNN 9.10).
+# Nor the newest cuDNN: 9.12+ for CUDA 12 dropped Maxwell/Pascal/Volta
+# (compute capability < 7.5), the GPUs this image exists for. 9.11.x is the
+# last release with both. It comes from the CUDA apt repository the base
+# image already has configured; `--build-arg CUDNN_VERSION=…` picks another
+# `libcudnn9-cuda-12` package version.
+# ------------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS runtime-cuda12
+ARG CUDNN_VERSION=9.11.1.4-1
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tesseract-ocr curl \
+       fonts-liberation fonts-dejavu-core \
+       "libcudnn9-cuda-12=${CUDNN_VERSION}" \
+    && apt-mark hold libcudnn9-cuda-12 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=assets /src/.models ./.models
+# libonnxruntime.so is linked dynamically, and ONNX Runtime opens its providers
+# from the directory it was loaded from — so the library and the providers live
+# together in /usr/local/lib. The links in /usr/local/bin keep the providers
+# reachable from the binary's own directory as well, as in runtime-cuda (#664).
+COPY --from=build-cuda12 /src/cuda-dylibs/ /usr/local/lib/
+RUN ldconfig \
+    && ln -s /usr/local/lib/libonnxruntime_providers_*.so /usr/local/bin/
+# One page worker and one OCR lane on the GPU. The pool is otherwise sized
+# from the host's *CPU* count (cores / 2, up to 16 workers), and every worker
+# opens its own layout/TableFormer/OCR sessions — each with its own CUDA BFC
+# arena, cuBLAS handle and cuDNN workspace. On the small cards this image
+# targets (an 8 GB Quadro P4000 on a many-core host) that filled the device
+# and conversions failed with `CUBLAS failure 3: the resource allocation
+# failed` at `cublasCreate`, `BFCArena … Failed to allocate memory` and cuDNN
+# `HEURISTIC_QUERY_FAILED` — out of memory, not a library mismatch. The GPU
+# batches pages within one worker (#338); raise both with `-e` on a large
+# card (e.g. a 32 GB V100: DOCLING_RS_PDF_WORKERS=4).
+# OCR (detector, recognizer, line classifier) on the CPU; layout and
+# TableFormer keep the GPU. On Pascal (P4000, sm_61) ONNX Runtime's cuDNN-9
+# conv path picked plans for the recognizer's line batches whose scratch
+# buffer alone was 8-17 GB (`BFCArena ... Failed to allocate memory for
+# requested buffer of size 17585799168`) — uncapped in that path — and the
+# small OCR models gain little from a GPU anyway (a new input width, i.e. a
+# new cuDNN plan, on nearly every call). `-e DOCLING_RS_OCR_EP=auto` puts
+# OCR back on the GPU.
+# Fonts pinned as in the CPU runtime stage (#633).
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
+    DOCLING_RS_EP=auto \
+    DOCLING_RS_OCR_EP=cpu \
+    DOCLING_RS_PDF_WORKERS=1 \
+    DOCLING_RS_OCR_SESSIONS=1 \
+    DOCLING_RS_SYSTEM_FONTS=0 \
+    DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
+
 # ==============================================================================
 # Final targets: CPU
 # ==============================================================================
@@ -278,4 +400,24 @@ EXPOSE 5001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -f http://localhost:5001/ready || exit 1
 # Absolute, so ONNX Runtime finds its providers next to the binary (#664).
+CMD ["/usr/local/bin/docling-serve", "--addr", "0.0.0.0:5001", "--warmup"]
+
+# ==============================================================================
+# Final targets: CUDA 12.8 GPU (Volta/Pascal-capable, dynamic ONNX Runtime)
+# ==============================================================================
+
+# --- the CLI (CUDA 12) --------------------------------------------------------
+FROM runtime-cuda12 AS cli-cuda12
+LABEL io.modelcontextprotocol.server.name="io.github.docling-project/docling-rs"
+COPY --from=build-cuda12 /src/target/release/docling-rs /usr/local/bin/docling-rs
+ENV DOCLING_RS_MODELS_DIR=/app/.models
+WORKDIR /data
+ENTRYPOINT ["/usr/local/bin/docling-rs"]
+
+# --- the HTTP API (CUDA 12) ---------------------------------------------------
+FROM runtime-cuda12 AS serve-cuda12
+COPY --from=build-cuda12 /src/target/release/docling-serve /usr/local/bin/docling-serve
+EXPOSE 5001
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
+    CMD curl -f http://localhost:5001/ready || exit 1
 CMD ["/usr/local/bin/docling-serve", "--addr", "0.0.0.0:5001", "--warmup"]

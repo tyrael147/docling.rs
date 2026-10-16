@@ -94,7 +94,8 @@ mod session {
                 .map_err(|e| format!("ocr-cls: builder: {e}"))?
                 .with_intra_threads(1)
                 .map_err(|e| format!("ocr-cls: intra_threads: {e}"))?;
-            let builder = docling_onnx::apply(builder).map_err(|e| format!("ocr-cls: {e}"))?;
+            let builder = docling_onnx::apply_stage(builder, "DOCLING_RS_OCR_EP")
+                .map_err(|e| format!("ocr-cls: {e}"))?;
             let session = docling_onnx::commit(builder, &path, "textline_ori")
                 .map_err(|e| format!("ocr-cls: load {path}: {e}"))?;
             Ok(Self { session })
