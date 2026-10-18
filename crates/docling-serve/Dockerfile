@@ -17,8 +17,8 @@
 # NVIDIA CUDA 12.8 GPU targets, for GPUs CUDA 13 dropped (Maxwell/Pascal/Volta:
 # Tesla V100 = sm_70, P100, GTX 10xx) — a CUDA 13 image dies on them at
 # `cublasCreate` with CUBLAS_STATUS_ARCH_MISMATCH ("CUBLAS failure 8"). Built on
-# Ubuntu 24.04 + cuDNN 9.11 (the last cuDNN with pre-Turing support, and the
-# first fix for cuDNN 9.8's asymmetric-padding convs — see runtime-cuda12),
+# Ubuntu 24.04 + cuDNN 9.10.2 (the last cuDNN with pre-Turing support, and
+# past cuDNN 9.8's asymmetric-padding conv bug — see runtime-cuda12),
 # linked against Microsoft's CUDA 12 ONNX Runtime (pyke ships no CUDA 12
 # build); host driver >= 570 recommended (560 runs it through CUDA minor-version
 # compatibility). Also runs on Turing..Blackwell:
@@ -268,21 +268,25 @@ ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
     DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 
 # ------------------------------------------------------------------------------
-# Stage: runtime-cuda12 (CUDA 12.8 + pinned cuDNN 9.11 on Ubuntu 24.04)
+# Stage: runtime-cuda12 (CUDA 12.8 + pinned cuDNN 9.10.2 on Ubuntu 24.04)
 #
 # Not the `-cudnn-runtime` image: its cuDNN 9.8.0 has no engine for a
 # convolution with asymmetric padding, so the PP-OCRv6 recognizer
 # (ocr_rec_v6.onnx — 2x2 `SAME_UPPER` convs in its stem, pads [0,0]/[1,1])
 # fails every run with `CUDNN_FE failure 8: HEURISTIC_QUERY_FAILED` / "No
 # valid engine configs" (microsoft/onnxruntime#26274; fixed in cuDNN 9.10).
-# Nor the newest cuDNN: 9.12+ for CUDA 12 dropped Maxwell/Pascal/Volta
-# (compute capability < 7.5), the GPUs this image exists for. 9.11.x is the
-# last release with both. It comes from the CUDA apt repository the base
+# Nor anything newer than 9.10: cuDNN 9.11's release notes drop
+# Maxwell/Pascal/Volta (compute capability < 7.5), the GPUs this image exists
+# for — its support matrix still lists 6.1/7.0, but on a Quadro P4000 (sm_61)
+# its heuristics hand ONNX Runtime plans that fail at run time
+# (`CUDNN_STATUS_EXECUTION_FAILED` / `CUDNN_FE failure 11` on the layout
+# model's first conv). 9.10.2 is the last release supporting them (deprecated)
+# and NVIDIA's recommended cuDNN for pre-Volta GPUs. It comes from the CUDA apt repository the base
 # image already has configured; `--build-arg CUDNN_VERSION=…` picks another
 # `libcudnn9-cuda-12` package version.
 # ------------------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS runtime-cuda12
-ARG CUDNN_VERSION=9.11.1.4-1
+ARG CUDNN_VERSION=9.10.2.21-1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tesseract-ocr curl \
        fonts-liberation fonts-dejavu-core \
        "libcudnn9-cuda-12=${CUDNN_VERSION}" \

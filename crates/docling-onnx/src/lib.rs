@@ -675,8 +675,8 @@ pub fn apply(builder: SessionBuilder) -> Result<SessionBuilder, String> {
 /// sm_61) under the CUDA 12 image: ONNX Runtime 1.31's cuDNN-9 convolution
 /// path sizes its scratch buffer from the top-ranked cuDNN plan with no cap
 /// (the legacy path's 32 MB `cudnn_conv_use_max_workspace` limit does not
-/// apply), and for the recognizer's width-varying line batches cuDNN 9.11
-/// ranks plans needing 8–17 GB first, so every run failed in `BFCArena`. The
+/// apply), and for the recognizer's width-varying line batches cuDNN
+/// ranked plans needing 8–17 GB first, so every run failed in `BFCArena`. The
 /// OCR models are small and see a new input width on nearly every call — a
 /// fresh cuDNN plan each time — so the CPU costs them little, while layout
 /// and TableFormer keep the GPU. Any other value (or unset) follows

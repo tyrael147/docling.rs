@@ -572,11 +572,13 @@ recipe below, with the `gpu_cuda12` asset — built for sm_60…sm_120) on a CUD
 12.x + cuDNN 9 machine (driver ≥ 570). The Dockerfile does exactly this:
 `docker build -f crates/docling-serve/Dockerfile --target serve-cuda12 .`
 (also `cli-cuda12`; `--build-arg CUDA_VERSION=12.x.y` picks the base image).
-Outside the image, use cuDNN **9.10–9.11** for these GPUs: 9.8 (the
+Outside the image, use cuDNN **9.10.2** for these GPUs: 9.8 (the
 `nvidia/cuda:12.8.1-cudnn` images' version) fails the PP-OCRv6 recognizer's
 asymmetric-padding convolutions with `CUDNN_FE failure 8:
-HEURISTIC_QUERY_FAILED` (microsoft/onnxruntime#26274), and 9.12+ dropped
-compute capability < 7.5. The image pins `libcudnn9-cuda-12=9.11.1.4-1`. On an
+HEURISTIC_QUERY_FAILED` (microsoft/onnxruntime#26274), and 9.11 dropped
+pre-Turing GPUs — on a Quadro P4000 its plans fail at run time with
+`CUDNN_STATUS_EXECUTION_FAILED` (`CUDNN_FE failure 11`) on the layout model's
+first convolution. The image pins `libcudnn9-cuda-12=9.10.2.21-1`. On an
 8 GB card also cap the per-process session count —
 `DOCLING_RS_PDF_WORKERS=1 DOCLING_RS_OCR_SESSIONS=1` (the image's default) —
 or the per-worker CUDA arenas exhaust the device (`CUBLAS failure 3`).
